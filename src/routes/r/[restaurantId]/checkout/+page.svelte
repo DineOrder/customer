@@ -119,8 +119,8 @@
       }
 
       const key = `qsr_orders_${restaurantId}`;
-const existing = JSON.parse(sessionStorage.getItem(key) ?? '[]');
-sessionStorage.setItem(
+const existing = JSON.parse(localStorage.getItem(key) ?? '[]');
+localStorage.setItem(
   key,
   JSON.stringify([...existing, order.id])
 );

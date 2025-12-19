@@ -18,9 +18,9 @@ function writeToSession(cart: CartState | null): void {
   if (typeof window === 'undefined') return;
 
   if (cart) {
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cart));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cart));
   } else {
-    sessionStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(STORAGE_KEY);
   }
 }
 

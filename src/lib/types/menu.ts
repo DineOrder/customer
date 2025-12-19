@@ -4,10 +4,10 @@ export type MenuItem = {
   name: string;
   price: number;
   description: string | null;
-  tags: string[] | null;
+  tags: string[];
   is_veg: boolean;
   image_url: string | null;
   category_name: string | null;
   available: boolean;
-  sort_order: number | null;
+  sort_order: number;
 };
