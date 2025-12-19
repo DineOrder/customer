@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { page } from "$app/state";
+  import { page } from "$app/stores"; // ✅ IMPORTANT
   import { supabase } from "$lib/supabaseClient";
   import { cart } from "$lib/stores/cart";
 
@@ -15,9 +15,9 @@
     return v === "takeaway" ? "takeaway" : "dine_in";
   }
 
-  /* ------------------ Route ------------------ */
-  $: restaurantId = page.params.restaurantId as string;
-  $: orderType = parseOrderType(page.url.searchParams.get("type"));
+  /* ------------------ Route / Reactive ------------------ */
+  $: restaurantId = $page.params.restaurantId as string;
+  $: orderType = parseOrderType($page.url.searchParams.get("type"));
   $: cartState = $cart as CartState | null;
 
   /* ------------------ State ------------------ */
@@ -26,12 +26,22 @@
 
   let search = "";
   let activeCategory = "ALL";
-  let showCategoryPopup = false;
-
   let expandedDescriptions = new Set<string>();
 
-  /* ------------------ Helpers ------------------ */
+  /* ------------------ Order Type Switch ------------------ */
+  function switchOrderType(type: OrderType) {
+    if (type === orderType) return;
 
+    // Clear cart to avoid mixing order types
+    cart.clearCart();
+
+    // URL is the source of truth
+    goto(`/r/${restaurantId}/menu?type=${type}`, {
+      replaceState: true
+    });
+  }
+
+  /* ------------------ Helpers ------------------ */
   function toggleDescription(id: string) {
     const next = new Set(expandedDescriptions);
     next.has(id) ? next.delete(id) : next.add(id);
@@ -48,19 +58,17 @@
     return Array.from(map.entries());
   }
 
-  /* ------------------ local ORDERS ------------------ */
-
-  function getlocalOrderIds(): string[] {
+  /* ------------------ Local Orders ------------------ */
+  function getLocalOrderIds(): string[] {
     const key = `qsr_orders_${restaurantId}`;
     return JSON.parse(localStorage.getItem(key) ?? "[]");
   }
 
-  $: localOrderIds = getlocalOrderIds();
+  $: localOrderIds = getLocalOrderIds();
   $: activeOrdersCount = localOrderIds.length;
   $: latestOrderId = localOrderIds[0];
 
   /* ------------------ Derived ------------------ */
-
   $: categories = [
     "ALL",
     ...Array.from(new Set(items.map(i => i.category_name ?? "Others")))
@@ -73,18 +81,27 @@
     const q = search.toLowerCase();
     const matchesSearch =
       item.name.toLowerCase().includes(q) ||
-      (item.description ?? "").toLowerCase().includes(q) ||
-      (item.tags ?? []).some(t => t.toLowerCase().includes(q));
+      (item.description ?? "").toLowerCase().includes(q);
 
     return matchesCategory && matchesSearch;
   });
 
+  // ✅ Re-initialize cart whenever order type changes
+$: if (
+  restaurantId &&
+  orderType &&
+  (!$cart || $cart.restaurantId !== restaurantId || $cart.orderType !== orderType)
+) {
+  cart.initCart(restaurantId, orderType);
+}
+
+
+
   $: grouped = groupByCategory(filteredItems);
 
   /* ------------------ Load ------------------ */
-
   onMount(async () => {
-    if (!$cart) cart.initCart(restaurantId, orderType);
+    // cart.initCart(restaurantId, orderType);
 
     const { data, error } = await supabase
       .from("public_menu_items")
@@ -103,32 +120,7 @@
     loading = false;
   });
 
-  /* ------------------ Scroll helpers ------------------ */
-
-  let sectionRefs: Record<string, HTMLElement> = {};
-
-  function registerSection(node: HTMLElement, category: string) {
-    sectionRefs[category] = node;
-    return {
-      destroy() {
-        delete sectionRefs[category];
-      }
-    };
-  }
-
-  function scrollToCategory(cat: string) {
-    showCategoryPopup = false;
-    activeCategory = cat;
-
-    if (cat === "ALL") {
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    } else {
-      sectionRefs[cat]?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  }
-
   /* ------------------ Cart ------------------ */
-
   function add(item: MenuItem) {
     cart.addItem({
       itemId: item.id,
@@ -165,12 +157,35 @@
     {orderType === "dine_in" ? "Dine In" : "Takeaway"} Menu
   </h1>
 
+  <!-- ORDER TYPE SWITCH (UX-CLEAR) -->
+  <div class="flex gap-2 mb-4">
+    <button
+      class="flex-1 py-2 rounded-lg border text-sm font-medium transition
+        {orderType === 'dine_in'
+          ? 'bg-black text-white border-black'
+          : 'bg-white text-gray-700'}"
+      on:click={() => switchOrderType("dine_in")}
+    >
+      Dine In
+    </button>
+
+    <button
+      class="flex-1 py-2 rounded-lg border text-sm font-medium transition
+        {orderType === 'takeaway'
+          ? 'bg-black text-white border-black'
+          : 'bg-white text-gray-700'}"
+      on:click={() => switchOrderType("takeaway")}
+    >
+      Takeaway
+    </button>
+  </div>
+
   <!-- VIEW ORDERS -->
   {#if activeOrdersCount > 0}
     <button
       class="mb-4 w-full flex items-center justify-center gap-2
              border rounded-lg py-2 text-sm font-medium bg-white shadow-sm"
-      on:click={() => goto(`/r/${restaurantId}/status/${latestOrderId}`)}
+      on:click={() => goto(`/r/${restaurantId}/status`)}
     >
       📦 View Orders
       <span class="text-xs bg-black text-white px-2 py-0.5 rounded-full">
@@ -190,14 +205,12 @@
     <p class="text-sm text-gray-500">Loading menu…</p>
   {:else}
     {#each grouped as [category, items]}
-      <section class="mb-8" use:registerSection={category}>
+      <section class="mb-8">
         <h2 class="text-lg font-semibold mb-3">{category}</h2>
 
         <ul class="space-y-4">
           {#each items as item (item.id)}
             <li class="flex gap-4 border rounded-lg p-4 bg-white">
-              
-              <!-- IMAGE -->
               {#if item.image_url}
                 <img
                   src={item.image_url}
@@ -215,15 +228,8 @@
                 </div>
               {/if}
 
-              <!-- DETAILS -->
               <div class="flex-1">
-                <p class="font-medium">
-                  {item.name}
-                  <span class="ml-1 text-xs">
-                    {item.is_veg ? "🟢" : "🔴"}
-                  </span>
-                </p>
-
+                <p class="font-medium">{item.name}</p>
                 <p class="text-sm text-gray-600">₹{item.price}</p>
 
                 {#if item.description}
@@ -249,7 +255,6 @@
                 {/if}
               </div>
 
-              <!-- ACTION -->
               <div class="flex items-center">
                 {#if cartState?.items.find(i => i.itemId === item.id)}
                   <div class="flex items-center gap-2">
@@ -282,15 +287,6 @@
     {/each}
   {/if}
 </div>
-
-<!-- CATEGORY FAB -->
-<button
-  class="fixed bottom-24 right-4 w-12 h-12
-         bg-black text-white rounded-full shadow-lg"
-  on:click={() => (showCategoryPopup = true)}
->
-  ☰
-</button>
 
 <!-- CART BAR -->
 <div

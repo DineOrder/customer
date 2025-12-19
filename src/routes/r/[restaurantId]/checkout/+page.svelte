@@ -134,7 +134,7 @@ localStorage.setItem(
 
 
       /* 7️⃣ Redirect to LIVE STATUS PAGE */
-      goto(`/r/${restaurantId}/status/${order.id}`);
+      goto(`/r/${restaurantId}/status`);
     } catch (err) {
       console.error(err);
       alert('Something went wrong. Please try again.');

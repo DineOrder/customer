@@ -48,6 +48,14 @@
       0
     ) ?? 0;
 
+function backToMenu(): void {
+  if (!cartState?.orderType) return;
+
+  goto(`/r/${restaurantId}/menu?type=${cartState.orderType}`);
+}
+
+
+
   /**
    * Proceed to checkout
    */
@@ -57,7 +65,19 @@
 </script>
 
 <div class="min-h-screen px-4 py-6">
-  <h1 class="text-xl font-semibold mb-6">Your Cart</h1>
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-xl font-semibold">Your Cart</h1>
+
+  <button
+    type="button"
+    class="text-sm text-gray-600 underline"
+    on:click={backToMenu}
+  >
+    Back to Menu
+  </button>
+</div>
+
+
 
   {#if cartState && cartState.items.length > 0}
     <ul class="space-y-4 mb-6">
