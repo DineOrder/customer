@@ -1,6 +1,6 @@
 <script lang="ts">
   import { supabase } from '$lib/supabaseClient';
-
+import { goto } from '$app/navigation';
   let email = '';
   let password = '';
   let loading = false;
@@ -12,7 +12,6 @@ async function login() {
     return;
   }
 
-  error = null;
   loading = true;
 
   const { error: authError } =
@@ -25,7 +24,10 @@ async function login() {
 
   if (authError) {
     error = authError.message;
+    return;
   }
+
+  goto('/dashboard'); // or /dashboard
 }
 
 </script>

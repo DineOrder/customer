@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { supabase } from '$lib/supabaseClient';
-
+  import { uploadMenuImage } from '$lib/utils/uploadMenuImage';
+import placeholder from '$lib/assets/placeholder-food.png';
   export let restaurantId: string;
   export let categoryId: string;
   export let item: any | null;
@@ -22,6 +23,7 @@
 
   let selectedCategoryId = item?.category_id ?? categoryId;
   let saving = false;
+  let uploading = false;
 
   onMount(async () => {
     const { data } = await supabase
@@ -33,6 +35,39 @@
     categories = data ?? [];
   });
 
+  /* ---------------- IMAGE UPLOAD (EDIT ONLY) ---------------- */
+  async function handleImageUpload(e: Event) {
+    if (!restaurantId || !item?.id) return;
+
+    const input = e.target as HTMLInputElement;
+    if (!input.files?.[0]) return;
+
+    const file = input.files[0];
+
+    if (file.size >  1024 * 1024) {
+      alert('Image must be under 1MB');
+      return;
+    }
+
+    uploading = true;
+
+    try {
+      const url = await uploadMenuImage(
+        file,
+        restaurantId,
+        item.id
+      );
+
+      // Update ONLY local state
+      image_url = url;
+    } catch (err) {
+      alert('Image upload failed');
+    } finally {
+      uploading = false;
+    }
+  }
+
+  /* ---------------- SAVE ---------------- */
   async function save() {
     saving = true;
 
@@ -43,7 +78,7 @@
       price,
       description: description.trim() || null,
       tags: tags.split(',').map((t: string) => t.trim()).filter(Boolean),
-      image_url: image_url.trim() || null,
+      image_url: image_url || null,
       is_veg: isVeg,
       available
     };
@@ -76,7 +111,7 @@
       </h2>
     </div>
 
-    <!-- BODY (SCROLLABLE) -->
+    <!-- BODY -->
     <div class="p-4 space-y-4 overflow-y-auto">
 
       <input
@@ -106,13 +141,33 @@
         rows="2"
         placeholder="Description (optional)"
         bind:value={description}
-      />
+      ></textarea>
 
-      <input
-        class="w-full border rounded-lg px-4 py-3 text-base"
-        placeholder="Image URL"
-        bind:value={image_url}
-      />
+      <!-- 🔥 IMAGE UPLOAD (REPLACED IMAGE URL INPUT) -->
+      <div class="space-y-2">
+        <img
+          src={image_url || placeholder}
+          alt="Preview"
+          class="w-full h-40 object-cover rounded-lg border"
+        />
+
+        <label
+          class="inline-flex items-center gap-2 text-sm font-medium cursor-pointer"
+        >
+          📷 {uploading ? 'Uploading…' : 'Upload image'}
+          <input
+            type="file"
+            accept="image/*"
+            class="hidden"
+            on:change={handleImageUpload}
+            disabled={uploading}
+          />
+        </label>
+
+        <p class="text-xs text-slate-500">
+          JPG / PNG / WEBP · Max 2MB
+        </p>
+      </div>
 
       <input
         class="w-full border rounded-lg px-4 py-3 text-base"
@@ -152,7 +207,7 @@
       <button
         class="flex-1 bg-black text-white rounded-lg py-3 text-base
                disabled:opacity-50"
-        disabled={saving}
+        disabled={saving || uploading}
         on:click={save}
       >
         {saving ? 'Saving…' : 'Save'}

@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { page } from '$app/stores';
-  import { supabase } from '$lib/supabaseClient';
-  import html2canvas from 'html2canvas';
+  import { onMount, onDestroy } from "svelte";
+  import { goto } from "$app/navigation";
+  import { page } from "$app/stores";
+  import { supabase } from "$lib/supabaseClient";
+  import html2canvas from "html2canvas";
 
   /* ================= TYPES ================= */
 
-  type OrderStatus = 'pending' | 'preparing' | 'ready';
+  type OrderStatus = "pending" | "preparing" | "ready";
 
   type OrderItem = {
     quantity: number;
@@ -21,9 +21,11 @@
     id: string;
     token_number: number;
     status: OrderStatus;
-    order_type: 'dine_in' | 'takeaway';
+    order_type: "dine_in" | "takeaway";
     total_amount: number;
     created_at: string;
+    payment_status: "success" | "pending" | "failed" | "cancelled";
+    payment_mode: "counter" | "online";
     order_items: OrderItem[];
   };
 
@@ -41,33 +43,96 @@
   let restaurant: Restaurant | null = null;
   let loading = true;
 
-  let statusFilter: 'all' | OrderStatus = 'all';
+  let statusFilter: "all" | OrderStatus = "all";
 
   let channel: ReturnType<typeof supabase.channel> | null = null;
-let showDownloadConfirm = false;
-let selectedOrder: Order | null = null;
+
+  let showDownloadConfirm = false;
+  let selectedOrder: Order | null = null;
 
   /* ================= HELPERS ================= */
 
-  function statusLabel(s: OrderStatus) {
-    return s === 'pending'
-      ? 'Order Placed'
-      : s === 'preparing'
-      ? 'Preparing'
-      : 'Ready';
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+  function isWithinOneDay(iso: string): boolean {
+    return Date.now() - new Date(iso).getTime() <= ONE_DAY_MS;
   }
 
-  function statusBadgeClass(s: OrderStatus) {
-    return s === 'ready'
-      ? 'bg-green-100 text-green-700'
-      : s === 'preparing'
-      ? 'bg-yellow-100 text-yellow-700'
-      : 'bg-blue-100 text-blue-700';
+  /* ---------- DISPLAY STATUS (FIXED) ---------- */
+
+  function getDisplayStatus(order: Order): string {
+    const { payment_mode, payment_status, status } = order;
+
+    if (payment_status !== "success") {
+      if (payment_mode === "counter" && payment_status === "pending") {
+        return "Payment Pending";
+      }
+      if (payment_mode === "online" && payment_status === "pending") {
+        return "Payment Processing";
+      }
+      if (payment_status === "failed") {
+        return "Payment Failed";
+      }
+      if (payment_status === "cancelled") {
+        return "Payment Cancelled";
+      }
+    }
+
+    if (status === "pending") return "Order Placed";
+    if (status === "preparing") return "Preparing";
+    return "Ready";
+  }
+
+  function getStatusBadgeClass(order: Order): string {
+    const { payment_status, payment_mode, status } = order;
+
+    if (payment_status !== "success") {
+      if (payment_status === "pending") {
+        return payment_mode === "counter"
+          ? "bg-orange-100 text-orange-700 border border-orange-200"
+          : "bg-amber-100 text-amber-700 border border-amber-200";
+      }
+
+      if (payment_status === "failed") {
+        return "bg-red-100 text-red-700 border border-red-200";
+      }
+
+      if (payment_status === "cancelled") {
+        return "bg-slate-100 text-slate-600 border border-slate-200";
+      }
+    }
+
+    if (status === "preparing") return "bg-yellow-100 text-yellow-700";
+    if (status === "ready") return "bg-green-100 text-green-700";
+
+    return "bg-blue-100 text-blue-700";
+  }
+
+  function getPaymentHint(order: Order): string | null {
+    if (order.payment_status === "success") return null;
+
+    if (order.payment_mode === "counter") {
+      return "Please pay at counter to start preparation";
+    }
+
+    if (order.payment_status === "pending") {
+      return "Waiting for payment confirmation";
+    }
+
+    if (order.payment_status === "failed") {
+      return "Payment failed. Please retry";
+    }
+
+    if (order.payment_status === "cancelled") {
+      return "Payment was cancelled";
+    }
+
+    return null;
   }
 
   function getSessionOrderIds(): string[] {
     return JSON.parse(
-      localStorage.getItem(`qsr_orders_${restaurantId}`) ?? '[]'
+      localStorage.getItem(`qsr_orders_${restaurantId}`) ?? "[]",
     );
   }
 
@@ -81,13 +146,13 @@ let selectedOrder: Order | null = null;
       order_type: o.order_type,
       total_amount: Number(o.total_amount),
       created_at: o.created_at,
+      payment_status: o.payment_status,
+      payment_mode: o.payment_mode,
       order_items: (o.order_items ?? []).map((i: any) => ({
         quantity: Number(i.quantity),
         price_per_item: Number(i.price_per_item),
-        menu_items: i.menu_items
-          ? { name: String(i.menu_items.name) }
-          : null
-      }))
+        menu_items: i.menu_items ? { name: String(i.menu_items.name) } : null,
+      })),
     }));
   }
 
@@ -100,34 +165,49 @@ let selectedOrder: Order | null = null;
       return;
     }
 
-    const { data, error } = await supabase
-      .from('orders')
-      .select(`
+    const { data } = await supabase
+      .from("orders")
+      .select(
+        `
         id,
         token_number,
         status,
         order_type,
         total_amount,
         created_at,
+        payment_status,
+        payment_mode,
         order_items (
           quantity,
           price_per_item,
           menu_items ( name )
         )
-      `)
-      .in('id', ids)
-      .order('created_at', { ascending: false });
+      `,
+      )
+      .in("id", ids)
+      .order("created_at", { ascending: false });
 
-    if (!error && data) {
-      orders = normalizeOrders(data);
+    if (data) {
+      const normalized = normalizeOrders(data);
+
+      const recentOrders = normalized.filter((o) =>
+        isWithinOneDay(o.created_at),
+      );
+
+      orders = recentOrders;
+
+      localStorage.setItem(
+        `qsr_orders_${restaurantId}`,
+        JSON.stringify(recentOrders.map((o) => o.id)),
+      );
     }
   }
 
   async function loadRestaurant(): Promise<void> {
     const { data } = await supabase
-      .from('restaurants')
-      .select('name')
-      .eq('id', restaurantId)
+      .from("restaurants")
+      .select("name")
+      .eq("id", restaurantId)
       .single();
 
     restaurant = data as Restaurant;
@@ -136,52 +216,36 @@ let selectedOrder: Order | null = null;
   /* ================= DERIVED ================= */
 
   $: filteredOrders =
-    statusFilter === 'all'
+    statusFilter === "all"
       ? orders
-      : orders.filter(o => o.status === statusFilter);
+      : orders.filter((o) => o.status === statusFilter);
 
   /* ================= DOWNLOAD ================= */
 
-  // async function downloadBill(orderId: string): Promise<void> {
-  //   const el = document.getElementById(`bill-${orderId}`);
-  //   if (!el) return;
-
-  //   const canvas = await html2canvas(el, {
-  //     backgroundColor: '#ffffff',
-  //     scale: 2
-  //   });
-
-  //   const link = document.createElement('a');
-  //   link.download = `order_${orderId}.jpg`;
-  //   link.href = canvas.toDataURL('image/jpeg', 0.95);
-  //   link.click();
-  // }
-
   function requestDownload(order: Order) {
-  selectedOrder = order;
-  showDownloadConfirm = true;
-}
+    selectedOrder = order;
+    showDownloadConfirm = true;
+  }
 
-async function confirmDownload() {
-  if (!selectedOrder) return;
+  async function confirmDownload() {
+    if (!selectedOrder) return;
 
-  const el = document.getElementById(`print-${selectedOrder.id}`);
-  if (!el) return;
+    const el = document.getElementById(`print-${selectedOrder.id}`);
+    if (!el) return;
 
-  const canvas = await html2canvas(el, {
-    backgroundColor: '#ffffff',
-    scale: 2
-  });
+    const canvas = await html2canvas(el, {
+      backgroundColor: "#ffffff",
+      scale: 2,
+    });
 
-  const link = document.createElement('a');
-  link.download = `token_${selectedOrder.token_number}.jpg`;
-  link.href = canvas.toDataURL('image/jpeg', 0.95);
-  link.click();
+    const link = document.createElement("a");
+    link.download = `token_${selectedOrder.token_number}.jpg`;
+    link.href = canvas.toDataURL("image/jpeg", 0.95);
+    link.click();
 
-  showDownloadConfirm = false;
-  selectedOrder = null;
-}
-
+    showDownloadConfirm = false;
+    selectedOrder = null;
+  }
 
   /* ================= LIFECYCLE ================= */
 
@@ -193,23 +257,22 @@ async function confirmDownload() {
     channel = supabase
       .channel(`orders-${restaurantId}`)
       .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'orders' },
+        "postgres_changes",
+        { event: "*", schema: "public", table: "orders" },
         async () => {
           await loadOrders();
-        }
+        },
       )
       .subscribe();
   });
 
-  function orderMore() {
-  goto(`/r/${restaurantId}/menu`);
-}
-
-
   onDestroy(() => {
     if (channel) supabase.removeChannel(channel);
   });
+
+  function orderMore() {
+    goto(`/r/${restaurantId}/menu`);
+  }
 </script>
 
 <!-- ================= UI ================= -->
@@ -218,109 +281,87 @@ async function confirmDownload() {
   {#if loading}
     <p class="text-center text-gray-500">Loading orders…</p>
   {:else}
-<!-- STICKY HEADER -->
-<div class="sticky top-0 z-20 bg-white border-b px-4 py-3 mb-6">
-  <div class="max-w-md mx-auto flex items-center justify-between">
-    <!-- LEFT -->
-    <div class="text-left">
-      <p class="text-xs text-gray-500 leading-none">
-        {restaurant?.name}
-      </p>
-      <h1 class="text-base font-semibold leading-tight">
-        Your Orders
-      </h1>
+    <div class="sticky top-0 z-20 bg-white border-b px-4 py-3 mb-6">
+      <div class="max-w-md mx-auto flex items-center justify-between">
+        <div>
+          <p class="text-xs text-gray-500">{restaurant?.name}</p>
+          <h1 class="text-base font-semibold">Your Orders</h1>
+        </div>
+
+        <button
+          class="px-4 py-2 rounded-lg text-sm bg-black text-white"
+          on:click={orderMore}
+        >
+          + Order More
+        </button>
+      </div>
     </div>
 
-    <!-- CTA -->
-    <button
-      type="button"
-      class="
-        px-4 py-2 rounded-lg text-sm font-medium
-        bg-black text-white
-        shadow-sm
-        hover:bg-gray-900
-        active:scale-[0.98]
-        transition
-      "
-      on:click={orderMore}
-    >
-      + Order More
-    </button>
-  </div>
-</div>
+    <div class="flex justify-center gap-3 mb-6">
+      {#each ["all", "pending", "preparing", "ready"] as f}
+        <button
+          class={`px-4 py-2 rounded-lg text-sm border
+        ${
+          statusFilter === f ? "bg-black text-white" : "bg-white text-gray-700"
+        }`}
+          on:click={() => (statusFilter = f as any)}
+        >
+          {f === "all" ? "All Orders" : f}
+        </button>
+      {/each}
+    </div>
 
-
-<!-- FILTER -->
-<div class="flex flex-wrap justify-center gap-3 mb-6">
-  {#each ['all', 'pending', 'preparing', 'ready'] as f}
-    <button
-      type="button"
-      class="
-        px-4 py-2 rounded-lg text-sm font-medium transition
-        border
-        {statusFilter === f
-          ? 'bg-black text-white border-black'
-          : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-100'}
-      "
-      on:click={() => (statusFilter = f as any)}
-    >
-      {f === 'all' ? 'All Orders' : statusLabel(f as OrderStatus)}
-    </button>
-  {/each}
-</div>
-
-
-
-    <!-- BILLS LIST -->
     {#if filteredOrders.length > 0}
       <div class="space-y-4 max-w-md mx-auto">
         {#each filteredOrders as order (order.id)}
           <div
-            id={`bill-${order.id}`}
-            class="bg-white border border-gray-200 rounded-lg p-4"
+            tabindex="0"
+            class="bg-white border rounded-lg p-4"
             on:click={() => requestDownload(order)}
           >
-            <!-- TOP ROW -->
-            <div class="flex items-center justify-between mb-3">
+            <div class="flex justify-between mb-2">
               <div>
-                <p class="text-xl font-semibold leading-none">
-                  #{order.token_number}
-                </p>
-                <p class="text-xs text-gray-500 mt-1">
-                  {order.order_type === 'dine_in' ? 'Dine In' : 'Takeaway'}
+                <p class="text-xl font-semibold">#{order.token_number}</p>
+                <p class="text-xs text-gray-500">
+                  {order.order_type === "dine_in" ? "Dine In" : "Takeaway"}
                 </p>
               </div>
 
               <span
-                class={`px-2 py-0.5 rounded text-xs font-medium
-                  ${statusBadgeClass(order.status)}`}
+                class={`
+    inline-flex items-center gap-1.5
+    px-3 py-1
+    rounded-full
+    text-xs font-semibold
+    ${getStatusBadgeClass(order)}
+  `}
               >
-                {statusLabel(order.status)}
+                {getDisplayStatus(order)}
               </span>
             </div>
 
-            <!-- ITEMS -->
+            {#if getPaymentHint(order)}
+              <div
+                class="mb-3 rounded-md bg-orange-50 border border-orange-200 px-3 py-2 text-xs text-orange-700"
+              >
+                {getPaymentHint(order)}
+              </div>
+            {/if}
+
             <div class="divide-y text-sm">
               {#each order.order_items as item}
                 <div class="flex justify-between py-2">
-                  <span class="text-gray-800">
-                    {item.menu_items?.name ?? 'Item'} × {item.quantity}
-                  </span>
-                  <span class="text-gray-900 tabular-nums">
-                    ₹{item.quantity * item.price_per_item}
-                  </span>
+                  <span
+                    >{item.menu_items?.name ?? "Item"} × {item.quantity}</span
+                  >
+                  <span>₹{item.quantity * item.price_per_item}</span>
                 </div>
               {/each}
             </div>
 
-            <!-- TOTAL -->
-            <div class="flex justify-between items-center pt-3 mt-2 border-t">
-              <span class="text-sm font-medium text-gray-700">
-                Total
-              </span>
-              <span class="text-base font-semibold tabular-nums">
-                ₹{order.total_amount}
-              </span>
+            <div class="flex justify-between pt-3 border-t mt-2 font-semibold">
+              <span>Total</span>
+              <span>₹{order.total_amount}</span>
             </div>
 
             <p class="mt-2 text-[11px] text-gray-400 text-center">
@@ -330,92 +371,12 @@ async function confirmDownload() {
         {/each}
       </div>
     {:else}
-      <p class="text-center text-gray-500 mt-8">
-        No orders match this filter
-      </p>
+      <p class="text-center text-gray-500 mt-8">No orders match this filter</p>
     {/if}
+
+    <p class="mt-8 text-[11px] text-center text-gray-400">
+      Orders older than 24 hours are automatically hidden. Local history may not
+      reflect all orders.
+    </p>
   {/if}
 </div>
-{#if selectedOrder}
-  <div class="fixed left-[-9999px] top-0">
-    <div
-      id={`print-${selectedOrder.id}`}
-      class="w-[360px] bg-white p-4 text-sm text-black"
-    >
-      <!-- RESTAURANT -->
-      <div class="text-center mb-3">
-        <p class="font-semibold">{restaurant?.name}</p>
-        <p class="text-xs text-gray-600">Order Receipt</p>
-      </div>
-
-      <!-- TOKEN -->
-      <div class="text-center mb-4">
-        <p class="text-2xl font-bold">
-          Token #{selectedOrder.token_number}
-        </p>
-        <p class="text-xs uppercase">
-          {selectedOrder.order_type === 'dine_in'
-            ? 'Dine In'
-            : 'Takeaway'}
-        </p>
-      </div>
-
-      <!-- ITEMS -->
-      <div class="border-t border-b divide-y">
-        {#each selectedOrder.order_items as item}
-          <div class="flex justify-between py-2">
-            <span>
-              {item.menu_items?.name ?? 'Item'} × {item.quantity}
-            </span>
-            <span>
-              ₹{item.quantity * item.price_per_item}
-            </span>
-          </div>
-        {/each}
-      </div>
-
-      <!-- TOTAL -->
-      <div class="flex justify-between font-semibold pt-3">
-        <span>Total</span>
-        <span>₹{selectedOrder.total_amount}</span>
-      </div>
-
-      <!-- NOTE -->
-      <p class="text-xs text-center text-gray-500 mt-4">
-        Please collect your order when your token is called.
-      </p>
-    </div>
-  </div>
-{/if}
-{#if showDownloadConfirm}
-  <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
-    <div class="bg-white rounded-lg p-4 w-72">
-      <p class="font-medium mb-3 text-center">
-        Download bill for Token #{selectedOrder?.token_number}?
-      </p>
-
-      <div class="flex gap-3 justify-end">
-        <button
-          type="button"
-          class="px-3 py-1.5 text-sm rounded-md border"
-          on:click={() => {
-            showDownloadConfirm = false;
-            selectedOrder = null;
-          }}
-        >
-          Cancel
-        </button>
-
-        <button
-          type="button"
-          class="px-3 py-1.5 text-sm rounded-md bg-black text-white"
-          on:click={confirmDownload}
-        >
-          Download
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-

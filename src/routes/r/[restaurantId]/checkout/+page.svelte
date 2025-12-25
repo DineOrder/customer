@@ -12,45 +12,42 @@
     | 'paytm'
     | 'pay_at_counter';
 
-  /* ------------------ Route Context ------------------ */
+  type PaymentMode = 'online' | 'counter';
+
+  /* ------------------ Route ------------------ */
   $: restaurantId = page.params.restaurantId as string;
 
   /* ------------------ Cart ------------------ */
   $: cartState = $cart as CartState | null;
 
-  /* ------------------ Derived ------------------ */
-  $: orderType = cartState?.orderType;
   $: items = cartState?.items ?? [];
+  $: orderType = cartState?.orderType;
 
   $: totalAmount =
     items.reduce((sum, i) => sum + i.price * i.quantity, 0);
 
-  /* ------------------ Form State ------------------ */
+  /* ------------------ Form ------------------ */
   let mobileNumber = cartState?.mobileNumber ?? '';
   let paymentMethod: PaymentMethod | null = null;
   let submitting = false;
-
-  /**
-   * 🔴 CRITICAL FLAG
-   * Prevents guard from redirecting while we are
-   * intentionally clearing cart & navigating
-   */
   let redirecting = false;
 
-  /* ------------------ Guard ------------------ */
+  /* ------------------ Guards ------------------ */
   $: if (!redirecting && (!cartState || items.length === 0)) {
     if (typeof window !== 'undefined') {
       goto(`/r/${restaurantId}/menu`);
     }
   }
 
-  /* ------------------ Actions ------------------ */
+  function getPaymentMode(method: PaymentMethod): PaymentMode {
+    return method === 'pay_at_counter' ? 'counter' : 'online';
+  }
 
-  function selectPayment(method: PaymentMethod): void {
+  function selectPayment(method: PaymentMethod) {
     paymentMethod = method;
   }
 
-  async function placeOrder(): Promise<void> {
+  async function placeOrder() {
     if (!cartState || !paymentMethod || submitting) return;
 
     if (
@@ -64,23 +61,17 @@
     submitting = true;
 
     try {
-      /* 1️⃣ Get next token number (RPC) */
-      const { data: tokenNumber, error: tokenError } =
+      /* Token */
+      const { data: token, error: tokenError } =
         await supabase.rpc('get_next_token', {
           rid: restaurantId
         });
 
-      if (tokenError || !tokenNumber) {
-        throw new Error('Token generation failed');
-      }
+      if (tokenError || !token) throw new Error('Token failed');
 
-      /* 2️⃣ Calculate total */
-      const total = cartState.items.reduce(
-        (sum, i) => sum + i.price * i.quantity,
-        0
-      );
+      const paymentMode = getPaymentMode(paymentMethod);
 
-      /* 3️⃣ Create order */
+      /* Create order */
       const { data: order, error: orderError } = await supabase
         .from('orders')
         .insert({
@@ -90,129 +81,98 @@
             cartState.orderType === 'takeaway'
               ? mobileNumber
               : null,
-          total_amount: total,
+          total_amount: totalAmount,
+          payment_mode: paymentMode,
           payment_status: 'pending',
           status: 'pending',
-          token_number: tokenNumber
+          token_number: token
         })
         .select()
         .single();
 
-      if (orderError || !order) {
-        throw new Error('Order creation failed');
-      }
+      if (orderError || !order) throw new Error('Order failed');
 
-      /* 4️⃣ Insert order items */
-      const orderItemsPayload = cartState.items.map((item) => ({
-        order_id: order.id,
-        item_id: item.itemId,
-        quantity: item.quantity,
-        price_per_item: item.price
-      }));
+      /* Items */
+      await supabase.from('order_items').insert(
+        cartState.items.map((i) => ({
+          order_id: order.id,
+          item_id: i.itemId,
+          quantity: i.quantity,
+          price_per_item: i.price
+        }))
+      );
 
-      const { error: itemsError } = await supabase
-        .from('order_items')
-        .insert(orderItemsPayload);
-
-      if (itemsError) {
-        throw new Error('Order items insert failed');
-      }
-
+      /* Store order in session */
       const key = `qsr_orders_${restaurantId}`;
-const existing = JSON.parse(localStorage.getItem(key) ?? '[]');
-localStorage.setItem(
-  key,
-  JSON.stringify([...existing, order.id])
-);
+      const existing = JSON.parse(localStorage.getItem(key) ?? '[]');
+      localStorage.setItem(
+        key,
+        JSON.stringify([...existing, order.id])
+      );
 
-
-      /* 5️⃣ IMPORTANT: suppress guard */
+      cart.clearCart();
       redirecting = true;
 
-      /* 6️⃣ Clear cart AFTER success */
-      cart.clearCart();
-
-
-      /* 7️⃣ Redirect to LIVE STATUS PAGE */
       goto(`/r/${restaurantId}/status`);
-    } catch (err) {
-      console.error(err);
-      alert('Something went wrong. Please try again.');
+    } catch (e) {
+      console.error(e);
+      alert('Something went wrong');
       submitting = false;
     }
   }
 </script>
 
-<!-- ------------------ PAGE ------------------ -->
+<!-- ================= UI ================= -->
+
 <div class="min-h-screen px-4 py-6">
   <h1 class="text-xl font-semibold mb-6">Checkout</h1>
 
-  <!-- Order Summary -->
-  <div class="border rounded-lg p-4 mb-6">
-    <h2 class="font-medium mb-2">Order Summary</h2>
+  <!-- ORDER SUMMARY -->
+  <div class="mb-6 border rounded-xl p-4 bg-white space-y-2">
+    {#each items as item}
+      <div class="flex justify-between text-sm">
+        <span>{item.quantity} × {item.name}</span>
+        <span>₹{item.price * item.quantity}</span>
+      </div>
+    {/each}
 
-    <ul class="space-y-2 text-sm">
-      {#each items as item (item.itemId)}
-        <li class="flex justify-between">
-          <span>{item.name} × {item.quantity}</span>
-          <span>₹{item.price * item.quantity}</span>
-        </li>
-      {/each}
-    </ul>
-
-    <div class="flex justify-between font-semibold mt-4">
+    <div class="flex justify-between font-semibold pt-3 border-t">
       <span>Total</span>
       <span>₹{totalAmount}</span>
     </div>
   </div>
 
-  <!-- Takeaway Mobile -->
+  <!-- MOBILE NUMBER -->
   {#if orderType === 'takeaway'}
     <div class="mb-6">
-      <label for="mobile-number" class="block text-sm font-medium mb-1">
-        Mobile Number
+      <label for="" class="block text-sm font-medium mb-1">
+        Mobile number
       </label>
       <input
-        id="mobile-number"
-        type="tel"
-        class="w-full border rounded-lg px-3 py-2"
+        class="w-full border rounded-lg px-4 py-3"
         placeholder="Enter mobile number"
         bind:value={mobileNumber}
       />
     </div>
   {/if}
 
-  <!-- Payment Methods -->
+  <!-- PAYMENT OPTIONS -->
   <div class="mb-6">
-    <h2 class="font-medium mb-2">Payment Method</h2>
+    <h2 class="text-sm font-medium mb-3">Payment method</h2>
 
-    <div class="space-y-2">
+    <div class="space-y-3">
+      <!-- ONLINE -->
       <button
-        class="w-full border rounded-lg px-4 py-3 text-left
-          {paymentMethod === 'phonepe' ? 'border-black' : ''}"
-        on:click={() => selectPayment('phonepe')}
-      >
-        PhonePe
-      </button>
-
-      <button
-        class="w-full border rounded-lg px-4 py-3 text-left
+        class="w-full border rounded-xl px-4 py-3 text-left
           {paymentMethod === 'gpay' ? 'border-black' : ''}"
         on:click={() => selectPayment('gpay')}
       >
-        Google Pay
+        Pay Online (UPI / Cards)
       </button>
 
+      <!-- COUNTER -->
       <button
-        class="w-full border rounded-lg px-4 py-3 text-left
-          {paymentMethod === 'paytm' ? 'border-black' : ''}"
-        on:click={() => selectPayment('paytm')}
-      >
-        Paytm
-      </button>
-
-      <button
-        class="w-full border rounded-lg px-4 py-3 text-left
+        class="w-full border rounded-xl px-4 py-3 text-left
           {paymentMethod === 'pay_at_counter' ? 'border-black' : ''}"
         on:click={() => selectPayment('pay_at_counter')}
       >
@@ -221,15 +181,17 @@ localStorage.setItem(
     </div>
   </div>
 
-  <!-- Place Order -->
+  <!-- CTA -->
   <button
-    class="w-full py-4 rounded-xl text-white font-medium
-      {paymentMethod && !submitting
-        ? 'bg-black'
-        : 'bg-gray-300 cursor-not-allowed'}"
+    class="
+      w-full py-4 rounded-xl
+      bg-black text-white
+      text-lg font-medium
+      disabled:opacity-50
+    "
     disabled={!paymentMethod || submitting}
     on:click={placeOrder}
   >
-    {submitting ? 'Placing Order…' : 'Place Order'}
+    {submitting ? 'Placing order…' : `Place Order • ₹${totalAmount}`}
   </button>
 </div>
